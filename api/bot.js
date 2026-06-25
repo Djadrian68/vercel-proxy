@@ -1,4 +1,4 @@
-// api/bot.js — Asistente de visitantes con OpenAI, para Vercel.
+// api/bot.js — Asistente de visitantes con Anthropic (Claude), para Vercel.
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -7,41 +7,50 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') { res.status(204).end(); return; }
   if (req.method !== 'POST') { res.status(405).json({ reply: 'Metodo no permitido' }); return; }
 
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) { res.status(500).json({ reply: 'Falta configurar la API key.' }); return; }
 
-  try {
-    const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
-    const msg = (body.message || '').trim();
-    if (!msg) { res.status(200).json({ reply: 'En que te puedo ayudar?' }); return; }
+  let body = req.body;
+  if (!body || typeof body === 'string') {
+    try {
+      if (typeof body === 'string' && body.length) body = JSON.parse(body);
+      else {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const raw = Buffer.concat(chunks).toString('utf8');
+        body = raw ? JSON.parse(raw) : {};
+      }
+    } catch (e) { body = {}; }
+  }
 
-    let faqText = '';
-    (body.faqs || []).forEach(f => {
-      if (f.q && f.a) faqText += `P: ${f.q}\nR: ${f.a}\n\n`;
-    });
+  const msg = (body.message || '').trim();
+  if (!msg) { res.status(200).json({ reply: 'En que te puedo ayudar?' }); return; }
 
-    const tonos = {
-      amable: 'Hablas de forma amable y cordial.',
-      profesional: 'Hablas de forma profesional y formal.',
-      alegre: 'Hablas de forma alegre y divertida, con energia.',
-      dinamico: 'Hablas de forma dinamica y directa.',
-      calido: 'Hablas de forma calida y cercana.',
-      elegante: 'Hablas de forma elegante y sofisticada.',
-      canchero: 'Hablas de forma canchera y relajada, con onda argentina.'
-    };
-    const personajes = {
-      neutro: 'Sos un asistente virtual.',
-      mujer: 'Sos una asistenta. Te referis a vos misma en femenino.',
-      hombre: 'Sos un asistente. Te referis a vos mismo en masculino.',
-      joven_f: 'Sos una chica joven y simpatica.',
-      joven_m: 'Sos un chico joven y simpatico.',
-      experto: 'Sos un experto del rubro.',
-      mayordomo: 'Sos un mayordomo formal y atento.'
-    };
-    const tonoTxt = tonos[body.tono] || tonos.amable;
-    const persTxt = personajes[body.personaje] || personajes.neutro;
+  let faqText = '';
+  (body.faqs || []).forEach(f => { if (f.q && f.a) faqText += `P: ${f.q}\nR: ${f.a}\n\n`; });
 
-    const system =
+  const tonos = {
+    amable: 'Hablas de forma amable y cordial.',
+    profesional: 'Hablas de forma profesional y formal.',
+    alegre: 'Hablas de forma alegre y divertida, con energia.',
+    dinamico: 'Hablas de forma dinamica y directa.',
+    calido: 'Hablas de forma calida y cercana.',
+    elegante: 'Hablas de forma elegante y sofisticada.',
+    canchero: 'Hablas de forma canchera y relajada, con onda argentina.'
+  };
+  const personajes = {
+    neutro: 'Sos un asistente virtual.',
+    mujer: 'Sos una asistenta. Te referis a vos misma en femenino.',
+    hombre: 'Sos un asistente. Te referis a vos mismo en masculino.',
+    joven_f: 'Sos una chica joven y simpatica.',
+    joven_m: 'Sos un chico joven y simpatico.',
+    experto: 'Sos un experto del rubro.',
+    mayordomo: 'Sos un mayordomo formal y atento.'
+  };
+  const tonoTxt = tonos[body.tono] || tonos.amable;
+  const persTxt = personajes[body.personaje] || personajes.neutro;
+
+  const system =
 `Sos el asistente virtual de un negocio que atiende a sus visitantes web.
 ${persTxt} ${tonoTxt}
 Responde SOLO con la informacion provista abajo. Si no sabes algo, deci amablemente que no tenes ese dato y sugeri contactar al negocio.
@@ -54,29 +63,31 @@ ${body.business_info || '(sin informacion cargada)'}
 === PREGUNTAS FRECUENTES ===
 ${faqText}`;
 
+  try {
     const messages = [];
-    messages.push({ role: 'system', content: system });
     (body.history || []).slice(-8).forEach(h => {
       messages.push({ role: h.role === 'assistant' ? 'assistant' : 'user', content: String(h.content || '') });
     });
     messages.push({ role: 'user', content: msg });
 
-    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + apiKey,
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
       },
-      body: JSON.stringify({ model: 'gpt-4o-mini', max_tokens: 600, messages }),
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 600, system, messages }),
     });
 
     const data = await r.json();
     if (r.status >= 400) {
-      console.error('OpenAI bot error', r.status, JSON.stringify(data));
+      console.error('Bot Anthropic error', r.status, JSON.stringify(data));
       res.status(200).json({ reply: 'Disculpa, tuve un problema tecnico. Proba de nuevo.' });
       return;
     }
-    const reply = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
+    let reply = '';
+    (data.content || []).forEach(b => { if (b.type === 'text') reply += b.text; });
     res.status(200).json({ reply: reply.trim() || 'Disculpa, no pude responder.' });
   } catch (e) {
     res.status(200).json({ reply: 'Tuve un problema tecnico. Proba de nuevo.' });
